@@ -19,16 +19,18 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name=".AlbumArtService"
+        <service android:name=".AlbumArtService"/>
+
+        <receiver
+            android:name=".SpotifyBroadcastReceiver"
+            android:enabled="true"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.spotify.music.playbackstatechanged"/>
-                <action android:name="com.spotify.music.metadatachanged"/>
-                <action android:name="com.spotify.music.queuechanged"/>
+                <action android:name="com.spotify.music.playbackstatechanged" />
+                <action android:name="com.spotify.music.metadatachanged" />
+                <action android:name="com.spotify.music.queuechanged" />
             </intent-filter>
-        </service>
-
+        </receiver>
     </application>
 
 </manifest>

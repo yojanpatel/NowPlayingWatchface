@@ -27,6 +27,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -54,9 +55,11 @@ import java.util.concurrent.TimeUnit;
  * Analog watch face with a ticking second hand. In ambient mode, the second hand isn't shown. On
  * devices with low-bit ambient mode, the hands are drawn without anti-aliasing in ambient mode.
  */
-public class NowPlayingWatchface extends CanvasWatchFaceService {
+    public class NowPlayingWatchface extends CanvasWatchFaceService implements DataApi.DataListener {
 
     private static final String TAG = "NowPlayingWatchface";
+
+    private static final boolean SHOW_SECONDS = false;
 
     /**
      * Update rate in milliseconds for interactive mode. We update once a second to advance the
@@ -72,6 +75,11 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
     @Override
     public Engine onCreateEngine() {
         return new Engine();
+    }
+
+    @Override
+    public void onDataChanged(DataEventBuffer dataEventBuffer) {
+        Log.d(TAG, "onDataChanged");
     }
 
     private static class EngineHandler extends Handler {
@@ -119,6 +127,7 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
 
         @Override
         public void onCreate(SurfaceHolder holder) {
+            Log.d(TAG, "onCreate");
             super.onCreate(holder);
 
             setWatchFaceStyle(new WatchFaceStyle.Builder(NowPlayingWatchface.this)
@@ -145,11 +154,12 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
 
         private void initializeGoogleApiClient() {
             if (mGoogleApiClient == null) {
-                mGoogleApiClient = new GoogleApiClient.Builder(getApplicationContext())
+                mGoogleApiClient = new GoogleApiClient.Builder(NowPlayingWatchface.this)
                         .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
                             @Override
                             public void onConnected(Bundle connectionHint) {
                                 Log.d(TAG, "onConnected: " + connectionHint);
+                                Log.d(TAG, "wearable connected: " + mGoogleApiClient.hasConnectedApi(Wearable.API));
                                 Wearable.DataApi.addListener(mGoogleApiClient, Engine.this);
                             }
 
@@ -172,6 +182,7 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
 
         @Override
         public void onDestroy() {
+            Log.d(TAG, "onDestroy");
             mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME);
             super.onDestroy();
         }
@@ -225,20 +236,21 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
             float centerX = bounds.width() / 2f;
             float centerY = bounds.height() / 2f;
 
-            float secRot = mTime.second / 30f * (float) Math.PI;
+            if (SHOW_SECONDS) {
+                float secRot = mTime.second / 30f * (float) Math.PI;
+                float secLength = centerX - 20;
+                if (!mAmbient) {
+                    float secX = (float) Math.sin(secRot) * secLength;
+                    float secY = (float) -Math.cos(secRot) * secLength;
+                    canvas.drawLine(centerX, centerY, centerX + secX, centerY + secY, mHandPaint);
+                }
+            }
             int minutes = mTime.minute;
             float minRot = minutes / 30f * (float) Math.PI;
             float hrRot = ((mTime.hour + (minutes / 60f)) / 6f) * (float) Math.PI;
 
-            float secLength = centerX - 20;
             float minLength = centerX - 40;
             float hrLength = centerX - 80;
-
-            if (!mAmbient) {
-                float secX = (float) Math.sin(secRot) * secLength;
-                float secY = (float) -Math.cos(secRot) * secLength;
-                canvas.drawLine(centerX, centerY, centerX + secX, centerY + secY, mHandPaint);
-            }
 
             float minX = (float) Math.sin(minRot) * minLength;
             float minY = (float) -Math.cos(minRot) * minLength;
@@ -254,6 +266,7 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
             super.onVisibilityChanged(visible);
 
             if (visible) {
+                Log.d(TAG, "connecting GoogleApiClient");
                 mGoogleApiClient.connect();
                 registerReceiver();
 
@@ -263,6 +276,7 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
             } else {
                 unregisterReceiver();
                 if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
+                    Log.d(TAG, "disconnecting GoogleApiClient");
                     Wearable.DataApi.removeListener(mGoogleApiClient, this);
                     mGoogleApiClient.disconnect();
                 }
@@ -324,18 +338,21 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
 
         @Override
         public void onDataChanged(DataEventBuffer dataEvents) {
-            if (!mGoogleApiClient.isConnected() && !mGoogleApiClient.isConnecting()) {
-                mGoogleApiClient.connect();
-            }
+            Log.d(TAG, "onDataChanged: " + dataEvents.toString());
             for (DataEvent event : dataEvents) {
                 if (event.getType() == DataEvent.TYPE_CHANGED &&
                         event.getDataItem().getUri().getPath().equals("/albumart")) {
                     DataMapItem dataMapItem = DataMapItem.fromDataItem(event.getDataItem());
-                    Asset profileAsset = dataMapItem.getDataMap().getAsset("albumArt");
-                    Bitmap bitmap = loadBitmapFromAsset(profileAsset);
-                    // Do something with the bitmap
-                    updateCurrentAlbumArt(bitmap);
+                    Asset asset = dataMapItem.getDataMap().getAsset("albumArt");
+                    new UpdateWatchfaceTask().execute(asset);
                 }
+            }
+        }
+        private class UpdateWatchfaceTask extends AsyncTask<Asset, Void, Void> {
+            @Override
+            protected Void doInBackground(Asset... asset) {
+                updateCurrentAlbumArt(loadBitmapFromAsset(asset[0]));
+                return null;
             }
         }
 
@@ -351,7 +368,6 @@ public class NowPlayingWatchface extends CanvasWatchFaceService {
             // convert asset into a file descriptor and block until it's ready
             InputStream assetInputStream = Wearable.DataApi.getFdForAsset(
                     mGoogleApiClient, asset).await().getInputStream();
-            mGoogleApiClient.disconnect();
 
             if (assetInputStream == null) {
                 Log.w(TAG, "Requested an unknown Asset.");
