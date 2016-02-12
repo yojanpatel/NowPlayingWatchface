@@ -158,8 +158,6 @@ import java.util.concurrent.TimeUnit;
                         .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
                             @Override
                             public void onConnected(Bundle connectionHint) {
-                                Log.d(TAG, "onConnected: " + connectionHint);
-                                Log.d(TAG, "wearable connected: " + mGoogleApiClient.hasConnectedApi(Wearable.API));
                                 Wearable.DataApi.addListener(mGoogleApiClient, Engine.this);
                             }
 
@@ -182,7 +180,6 @@ import java.util.concurrent.TimeUnit;
 
         @Override
         public void onDestroy() {
-            Log.d(TAG, "onDestroy");
             mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME);
             super.onDestroy();
         }
@@ -266,7 +263,6 @@ import java.util.concurrent.TimeUnit;
             super.onVisibilityChanged(visible);
 
             if (visible) {
-                Log.d(TAG, "connecting GoogleApiClient");
                 mGoogleApiClient.connect();
                 registerReceiver();
 
@@ -276,7 +272,6 @@ import java.util.concurrent.TimeUnit;
             } else {
                 unregisterReceiver();
                 if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
-                    Log.d(TAG, "disconnecting GoogleApiClient");
                     Wearable.DataApi.removeListener(mGoogleApiClient, this);
                     mGoogleApiClient.disconnect();
                 }
@@ -338,10 +333,9 @@ import java.util.concurrent.TimeUnit;
 
         @Override
         public void onDataChanged(DataEventBuffer dataEvents) {
-            Log.d(TAG, "onDataChanged: " + dataEvents.toString());
             for (DataEvent event : dataEvents) {
                 if (event.getType() == DataEvent.TYPE_CHANGED &&
-                        event.getDataItem().getUri().getPath().equals("/albumart")) {
+                        event.getDataItem().getUri().getPath().startsWith("/albumart")) {
                     DataMapItem dataMapItem = DataMapItem.fromDataItem(event.getDataItem());
                     Asset asset = dataMapItem.getDataMap().getAsset("albumArt");
                     new UpdateWatchfaceTask().execute(asset);
@@ -351,7 +345,7 @@ import java.util.concurrent.TimeUnit;
         private class UpdateWatchfaceTask extends AsyncTask<Asset, Void, Void> {
             @Override
             protected Void doInBackground(Asset... asset) {
-                updateCurrentAlbumArt(loadBitmapFromAsset(asset[0]));
+                currentAlbumArt = loadBitmapFromAsset(asset[0]);
                 return null;
             }
         }
@@ -375,11 +369,6 @@ import java.util.concurrent.TimeUnit;
             }
             // decode the stream into a bitmap
             return BitmapFactory.decodeStream(assetInputStream);
-        }
-
-        private void updateCurrentAlbumArt(Bitmap bitmap) {
-            Log.d(TAG, "updating currentAlbumArt");
-            currentAlbumArt = bitmap;
         }
     }
 }

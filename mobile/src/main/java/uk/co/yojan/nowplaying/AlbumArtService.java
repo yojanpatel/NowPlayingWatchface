@@ -43,22 +43,12 @@ public class AlbumArtService extends IntentService {
     // Want the album art that is the smallest size above the screen size.
     private int WATCH_SCREEN_SIZE = 300;  // pixels
 
-    // record a backlog
-    Intent lastIntent;
-
     public AlbumArtService() {
         super("AlbumArtService");
     }
 
     @Override
-    public void onCreate() {
-        Log.d(TAG, "onCreate");
-        super.onCreate();
-    }
-
-    @Override
     public void onDestroy() {
-        Log.d(TAG, "onDestroy");
         super.onDestroy();
         if (mGoogleApiClient != null) {
             mGoogleApiClient.disconnect();
@@ -72,25 +62,9 @@ public class AlbumArtService extends IntentService {
         }
     }
 
-    private void initializeGoogleApiClient() {
+    private void initializeGoogleApiClientSync() {
         if (mGoogleApiClient == null) {
             mGoogleApiClient = new GoogleApiClient.Builder(this)
-//                    .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
-//                        @Override
-//                        public void onConnected(Bundle connectionHint) {
-//                            Log.d(TAG, "onConnected: " + connectionHint);
-//                            if (lastIntent != null) {
-//                                Log.d(TAG,"There was an unprocessed intent due to GoogleApiClient" +
-//                                        "connecting. Processing now");
-//                                onHandleIntent(lastIntent);
-//                            }
-//                        }
-//
-//                        @Override
-//                        public void onConnectionSuspended(int cause) {
-//                            Log.d(TAG, "onConnectionSuspended: " + cause);
-//                        }
-//                    })
                     .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
                         @Override
                         public void onConnectionFailed(ConnectionResult result) {
@@ -100,19 +74,30 @@ public class AlbumArtService extends IntentService {
                     // Request access only to the Wearable API
                     .addApi(Wearable.API)
                     .build();
+        }
+
+        if (!mGoogleApiClient.isConnected() && !mGoogleApiClient.isConnecting()) {
             mGoogleApiClient.blockingConnect(5, TimeUnit.SECONDS);
-            Log.d(TAG, "GoogleApiClient connected: " + mGoogleApiClient.isConnected());
-            Log.d(TAG, "GoogleApiClient.WearableAPI connected: " + mGoogleApiClient.hasConnectedApi(Wearable.API));
         }
     }
 
+    /**
+     * Performs the work for a track that is currently playing.
+     *
+     * - Download the track metadata from Spotify's web api (async via retrofit)
+     * - Extract the album url
+     * - Download the album cover bitmap (async via Picasso)
+     * - Convert the bitmap to a png to an asset
+     * - Sync the asset to the other nodes in the wearable network (async via DataApi)
+     */
     private void processTrack(String trackId) {
+        // Lazily instantiate spotify web api
         initializeSpotifyApi();
         mSpotifyService.getTrack(trackId, new Callback<Track>() {
             @Override
             public void success(Track track, Response response) {
-                Log.d("Track success", track.name);
-                downloadAndSyncImage(getAlbumArtUrl(track));
+                String albumUrl = getAlbumArtUrl(track);
+                downloadAndSyncImage(albumUrl);
             }
 
             @Override
@@ -136,7 +121,7 @@ public class AlbumArtService extends IntentService {
         }
 
         if (albumArt != null) {
-            Log.d(TAG, "Extracted album art url...");
+            Log.d(TAG, "Extracted album art url: " + albumArt.url);
             return albumArt.url;
         }
         return null;
@@ -146,16 +131,14 @@ public class AlbumArtService extends IntentService {
         Picasso.with(this).load(imageUrl).into(new Target() {
             @Override
             public void onBitmapLoaded(final Bitmap bitmap, Picasso.LoadedFrom from) {
-                Log.d(TAG, "Downloaded album art " + bitmap.getHeight() + " height.");
-                new AsyncTask<Void, Void, Void>() {
-
+                new AsyncTask<Bitmap, Void, Void>() {
                     @Override
-                    protected Void doInBackground(Void... params) {
-                        initializeGoogleApiClient();
-                        syncAssetToWatch(createAssetFromBitmap(bitmap));
+                    protected Void doInBackground(Bitmap... bitmap) {
+                        Asset albumArtAsset = createAssetFromBitmap(bitmap[0]);
+                        syncAssetToWatch(albumArtAsset);
                         return null;
                     }
-                }.execute();
+                }.execute(bitmap);
             }
 
             @Override
@@ -165,48 +148,35 @@ public class AlbumArtService extends IntentService {
 
             @Override
             public void onPrepareLoad(Drawable placeHolderDrawable) {
-
             }
         });
     }
 
     private static Asset createAssetFromBitmap(Bitmap bitmap) {
         final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+        bitmap.compress(Bitmap.CompressFormat.PNG, 80, byteStream);
         return Asset.createFromBytes(byteStream.toByteArray());
     }
 
     private void syncAssetToWatch(Asset asset) {
+        // lazily instantiate GoogleApiClient
+        initializeGoogleApiClientSync();
         if (!mGoogleApiClient.isConnected()) {
             Log.e(TAG, "mGoogleApiClient not connected");
             return;
         }
-        Log.d(TAG, "syncing asset to watch " + asset.getDigest());
-        PutDataMapRequest dataMap = PutDataMapRequest.create("/albumart");
+        PutDataMapRequest dataMap = PutDataMapRequest.createWithAutoAppendedId("/albumart");
         dataMap.getDataMap().putAsset("albumArt", asset);
-        PutDataRequest request = dataMap.asPutDataRequest();
-        request.setUrgent();
-        Log.d(TAG, request.getUri() + "");
-        Wearable.DataApi.deleteDataItems(mGoogleApiClient, request.getUri());
-        Wearable.DataApi.putDataItem(mGoogleApiClient, request).setResultCallback(
-                new ResultCallback<DataApi.DataItemResult>() {
-                    @Override
-                    public void onResult(DataApi.DataItemResult dataItemResult) {
-                        Log.d(TAG, "onResult, asset transferred."+dataItemResult.getStatus().isSuccess());
-                    }
-                }
-        );
+        PutDataRequest request = dataMap.asPutDataRequest().setUrgent();
+        Wearable.DataApi.putDataItem(mGoogleApiClient, request);
     }
 
     @Override
     protected void onHandleIntent(final Intent intent) {
-        Log.d(TAG, "onHandleIntent");
         if (intent != null) {
             final String action = intent.getAction();
             if (BroadcastTypes.PLAYBACK_STATE_CHANGED.equals(action)) {
                 Log.d(TAG, "Playback state changed.");
-//                boolean playing = intent.getBooleanExtra("playing", false);
-//                int positionInMs = intent.getIntExtra("playbackPosition", 0);
             } else if (BroadcastTypes.METADATA_CHANGED.equals(action)) {
                 Log.d(TAG, "Metadata changed");
                 String trackId = intent.getStringExtra("id");
@@ -214,13 +184,27 @@ public class AlbumArtService extends IntentService {
                 String albumName = intent.getStringExtra("album");
                 String trackName = intent.getStringExtra("track");
                 Log.d(TAG, String.format("%s - %s - %s", artistName, trackName, albumName));
-                int trackLengthInSec = intent.getIntExtra("length", 0);
-                processTrack(extractTrackId(trackId));
+                try {
+                    processTrack(extractTrackId(trackId));
+                } catch (IllegalArgumentException e) {
+                    Log.e(TAG, e.toString());
+                }
             }
         }
     }
 
-    private static String extractTrackId(String spotifyTrackId) {
-        return spotifyTrackId.split(":")[2];
+    /**
+     * Inconsistent spotify track id formats.
+     * Extract the actual id from the intent trackId for the web API.
+     */
+    private static String extractTrackId(String spotifyTrackId) throws IllegalArgumentException {
+        if(spotifyTrackId != null && !spotifyTrackId.isEmpty()) {
+            String[] trackIdParts = spotifyTrackId.split(":");
+            if (trackIdParts.length == 3) {
+                return spotifyTrackId.split(":")[2];
+            }
+        }
+
+        throw new IllegalArgumentException("Illegal spotify track id: " + spotifyTrackId);
     }
 }
