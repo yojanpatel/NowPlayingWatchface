@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
 import android.os.AsyncTask;
 import android.os.Bundle;
+import android.os.Parcelable;
 import android.util.Log;
 
 import com.google.android.gms.common.ConnectionResult;
@@ -41,7 +42,7 @@ public class AlbumArtService extends IntentService {
     private GoogleApiClient mGoogleApiClient;
 
     // Want the album art that is the smallest size above the screen size.
-    private int WATCH_SCREEN_SIZE = 300;  // pixels
+    private int WATCH_SCREEN_SIZE = 500;  // pixels
 
     public AlbumArtService() {
         super("AlbumArtService");
@@ -134,6 +135,7 @@ public class AlbumArtService extends IntentService {
                 new AsyncTask<Bitmap, Void, Void>() {
                     @Override
                     protected Void doInBackground(Bitmap... bitmap) {
+                        Log.d(TAG, "Loading album art");
                         Asset albumArtAsset = createAssetFromBitmap(bitmap[0]);
                         syncAssetToWatch(albumArtAsset);
                         return null;
@@ -168,6 +170,7 @@ public class AlbumArtService extends IntentService {
         PutDataMapRequest dataMap = PutDataMapRequest.createWithAutoAppendedId("/albumart");
         dataMap.getDataMap().putAsset("albumArt", asset);
         PutDataRequest request = dataMap.asPutDataRequest().setUrgent();
+        Log.d(TAG, "Syncing asset.");
         Wearable.DataApi.putDataItem(mGoogleApiClient, request);
     }
 
@@ -183,11 +186,18 @@ public class AlbumArtService extends IntentService {
                 String artistName = intent.getStringExtra("artist");
                 String albumName = intent.getStringExtra("album");
                 String trackName = intent.getStringExtra("track");
-                Log.d(TAG, String.format("%s - %s - %s", artistName, trackName, albumName));
-                try {
-                    processTrack(extractTrackId(trackId));
-                } catch (IllegalArgumentException e) {
-                    Log.e(TAG, e.toString());
+                Object picture = intent.getExtras().getParcelable("nowplaying/albumart");
+                if(picture instanceof Bitmap) {
+                    Log.d(TAG, "received image in notification");
+                    syncAssetToWatch(createAssetFromBitmap((Bitmap) picture));
+                } else {
+
+                    Log.d(TAG, String.format("%s - %s - %s", artistName, trackName, albumName));
+                    try {
+                        processTrack(extractTrackId(trackId));
+                    } catch (IllegalArgumentException e) {
+                        Log.e(TAG, e.toString());
+                    }
                 }
             }
         }

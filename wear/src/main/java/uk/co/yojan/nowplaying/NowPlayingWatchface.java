@@ -25,8 +25,14 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorMatrix;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
+import android.graphics.Point;
 import android.graphics.Rect;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSession;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
@@ -35,15 +41,14 @@ import android.support.wearable.watchface.CanvasWatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
 import android.text.format.Time;
 import android.util.Log;
+import android.view.Display;
 import android.view.SurfaceHolder;
+import android.view.WindowManager;
 
 import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.wearable.Asset;
 import com.google.android.gms.wearable.DataApi;
-import com.google.android.gms.wearable.DataEvent;
 import com.google.android.gms.wearable.DataEventBuffer;
-import com.google.android.gms.wearable.DataMapItem;
 import com.google.android.gms.wearable.Wearable;
 
 import java.io.InputStream;
@@ -102,9 +107,22 @@ import java.util.concurrent.TimeUnit;
         }
     }
 
-    private class Engine extends CanvasWatchFaceService.Engine implements DataApi.DataListener {
-        private GoogleApiClient mGoogleApiClient;
+    private class Engine extends CanvasWatchFaceService.Engine {
+
+        /**
+         * Whether the display supports fewer bits for each color in ambient mode. When true, we
+         * disable anti-aliasing in ambient mode.
+         */
+        boolean mLowBitAmbient;
+
+        private int mWidth;
+        private int mHeight;
+
+        private int top;
+        private int left;
+
         private Bitmap currentAlbumArt;
+        private Bitmap bwAlbumArt;
 
         final Handler mUpdateTimeHandler = new EngineHandler(this);
         boolean mRegisteredTimeZoneReceiver = false;
@@ -119,15 +137,44 @@ import java.util.concurrent.TimeUnit;
                 mTime.setToNow();
             }
         };
-        /**
-         * Whether the display supports fewer bits for each color in ambient mode. When true, we
-         * disable anti-aliasing in ambient mode.
-         */
-        boolean mLowBitAmbient;
+
+        public static final String ACTION_BITMAP = "uk.co.yojan.bitmap";
+        public static final String ACTION_MEDIA = "uk.co.yojan.media";
+
+        public static final String EXTRA_TOKEN = "token";
+        public static final String EXTA_BITMAP = "bitmap";
+
+        private final String[] PREFERRED_MEDIA_ART_ORDER = {
+                MediaMetadata.METADATA_KEY_ART,
+                MediaMetadata.METADATA_KEY_ALBUM_ART,
+                MediaMetadata.METADATA_KEY_DISPLAY_ICON
+        };
+
+        final BroadcastReceiver mediaReceiver = new BroadcastReceiver() {
+
+          @Override
+            public void onReceive(Context context, Intent intent) {
+                if(ACTION_MEDIA.equals(intent.getAction())) {
+                    MediaSession.Token token = intent.getParcelableExtra(EXTRA_TOKEN);
+                    MediaController mc = new MediaController(context, token);
+                    Log.d("MediaBroadcastReceiver",
+                            "" + mc.getMetadata().getText(MediaMetadata.METADATA_KEY_ARTIST));
+                    for (String key : PREFERRED_MEDIA_ART_ORDER) {
+                        Bitmap result = mc.getMetadata().getBitmap(key);
+                        if (result != null) {
+                            updateAlbumArt(result);
+                            return;
+                        }
+                    }
+                } else if (ACTION_BITMAP.equals(intent.getAction())){
+                    Bitmap bitmap = intent.getParcelableExtra(EXTA_BITMAP);
+                    Log.d("MediaBroadcastReceiver", "Received bitmap from broadcast" + bitmap.getHeight());
+                }
+            }
+        };
 
         @Override
         public void onCreate(SurfaceHolder holder) {
-            Log.d(TAG, "onCreate");
             super.onCreate(holder);
 
             setWatchFaceStyle(new WatchFaceStyle.Builder(NowPlayingWatchface.this)
@@ -149,33 +196,13 @@ import java.util.concurrent.TimeUnit;
 
             mTime = new Time();
 
-            initializeGoogleApiClient();
-        }
-
-        private void initializeGoogleApiClient() {
-            if (mGoogleApiClient == null) {
-                mGoogleApiClient = new GoogleApiClient.Builder(NowPlayingWatchface.this)
-                        .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
-                            @Override
-                            public void onConnected(Bundle connectionHint) {
-                                Wearable.DataApi.addListener(mGoogleApiClient, Engine.this);
-                            }
-
-                            @Override
-                            public void onConnectionSuspended(int cause) {
-                                Log.d(TAG, "onConnectionSuspended: " + cause);
-                            }
-                        })
-                        .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
-                            @Override
-                            public void onConnectionFailed(ConnectionResult result) {
-                                Log.d(TAG, "onConnectionFailed: " + result);
-                            }
-                        })
-                        // Request access only to the Wearable API
-                        .addApi(Wearable.API)
-                        .build();
-            }
+            WindowManager wm = (WindowManager) getApplicationContext()
+                    .getSystemService(Context.WINDOW_SERVICE);
+            Display display = wm.getDefaultDisplay();
+            Point size = new Point();
+            display.getSize(size);
+            mWidth = size.x;
+            mHeight = size.y;
         }
 
         @Override
@@ -218,10 +245,14 @@ import java.util.concurrent.TimeUnit;
 
             // Draw the background.
             if (isInAmbientMode()) {
-                canvas.drawColor(Color.BLACK);
+                if (bwAlbumArt != null) {
+                    canvas.drawBitmap(bwAlbumArt, left, top, null);
+                } else {
+                    canvas.drawColor(Color.BLACK);
+                }
             } else {
                 if (currentAlbumArt != null) {
-                    canvas.drawBitmap(currentAlbumArt, 0, 0, null);
+                    canvas.drawBitmap(currentAlbumArt, left, top, null);
                 } else {
                     canvas.drawRect(0, 0, canvas.getWidth(), canvas.getHeight(), mBackgroundPaint);
                 }
@@ -263,18 +294,12 @@ import java.util.concurrent.TimeUnit;
             super.onVisibilityChanged(visible);
 
             if (visible) {
-                mGoogleApiClient.connect();
                 registerReceiver();
-
                 // Update time zone in case it changed while we weren't visible.
                 mTime.clear(TimeZone.getDefault().getID());
                 mTime.setToNow();
             } else {
                 unregisterReceiver();
-                if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
-                    Wearable.DataApi.removeListener(mGoogleApiClient, this);
-                    mGoogleApiClient.disconnect();
-                }
             }
 
             // Whether the timer should be running depends on whether we're visible (as well as
@@ -289,6 +314,10 @@ import java.util.concurrent.TimeUnit;
             mRegisteredTimeZoneReceiver = true;
             IntentFilter filter = new IntentFilter(Intent.ACTION_TIMEZONE_CHANGED);
             NowPlayingWatchface.this.registerReceiver(mTimeZoneReceiver, filter);
+
+            IntentFilter mediaFilter = new IntentFilter(ACTION_BITMAP);
+            mediaFilter.addAction(ACTION_MEDIA);
+            NowPlayingWatchface.this.registerReceiver(mediaReceiver, mediaFilter);
         }
 
         private void unregisterReceiver() {
@@ -297,6 +326,7 @@ import java.util.concurrent.TimeUnit;
             }
             mRegisteredTimeZoneReceiver = false;
             NowPlayingWatchface.this.unregisterReceiver(mTimeZoneReceiver);
+            NowPlayingWatchface.this.unregisterReceiver(mediaReceiver);
         }
 
         /**
@@ -331,44 +361,62 @@ import java.util.concurrent.TimeUnit;
             }
         }
 
-        @Override
-        public void onDataChanged(DataEventBuffer dataEvents) {
-            for (DataEvent event : dataEvents) {
-                if (event.getType() == DataEvent.TYPE_CHANGED &&
-                        event.getDataItem().getUri().getPath().startsWith("/albumart")) {
-                    DataMapItem dataMapItem = DataMapItem.fromDataItem(event.getDataItem());
-                    Asset asset = dataMapItem.getDataMap().getAsset("albumArt");
-                    new UpdateWatchfaceTask().execute(asset);
+        private void updateBwAlbumArt(final Bitmap original) {
+            new AsyncTask<Void, Void, Void>() {
+                @Override
+                protected Void doInBackground(Void... params) {
+                    long now = System.currentTimeMillis();
+                    Bitmap bmpMonochrome = Bitmap.createBitmap(
+                            original.getWidth(), original.getHeight(), Bitmap.Config.ARGB_8888);
+                    Canvas canvas = new Canvas(bmpMonochrome);
+                    ColorMatrix ma = new ColorMatrix();
+                    ma.setSaturation(0);
+                    Paint paint = new Paint();
+                    paint.setColorFilter(new ColorMatrixColorFilter(ma));
+                    canvas.drawBitmap(original, 0, 0, paint);
+
+                    int w = bmpMonochrome.getWidth();
+                    int h = bmpMonochrome.getHeight();
+                    int[] pixels = new int[w * h];
+
+                    bmpMonochrome.getPixels(pixels, 0, w, 0, 0, w, h);
+                    Bitmap mono = Bitmap.createBitmap(
+                            bmpMonochrome.getWidth(),
+                            bmpMonochrome.getHeight(),
+                            Bitmap.Config.ARGB_8888);
+
+                    for (int y = 0; y < h; y++) {
+                        int offset = y * h;
+                        for (int x = 0; x < w; x++) {
+                            // Get the 7th bit (2^7 = 128) to determine 0 or 1 for pixel
+                            pixels[offset + x] =
+                                    ((pixels[offset + x] & 0x40) >> 6) == 1 ? Color.DKGRAY : Color.BLACK;
+                        }
+                    }
+                    mono.setPixels(pixels, 0, w, 0, 0, w, h);
+                    bwAlbumArt = mono;
+                    Log.d(TAG, "Converting to black-and-white took: " +
+                            (System.currentTimeMillis() - now) + "ms");
+                    return null;
                 }
-            }
-        }
-        private class UpdateWatchfaceTask extends AsyncTask<Asset, Void, Void> {
-            @Override
-            protected Void doInBackground(Asset... asset) {
-                currentAlbumArt = loadBitmapFromAsset(asset[0]);
-                return null;
-            }
+            }.execute();
         }
 
-        private Bitmap loadBitmapFromAsset(Asset asset) {
-            if (asset == null) {
-                throw new IllegalArgumentException("Asset must be non-null");
+        private void updateAlbumArt(Bitmap albumArt) {
+            if(albumArt.getWidth() < mWidth) {
+                Log.d(TAG, "updateAlbumArt scaling");
+                currentAlbumArt = Bitmap.createScaledBitmap(albumArt, mWidth, mHeight, true);
+            } else {
+                Log.d(TAG, "updateAlbumArt original");
+                currentAlbumArt = albumArt;
             }
-            ConnectionResult result =
-                    mGoogleApiClient.blockingConnect(5, TimeUnit.SECONDS);
-            if (!result.isSuccess()) {
-                return null;
-            }
-            // convert asset into a file descriptor and block until it's ready
-            InputStream assetInputStream = Wearable.DataApi.getFdForAsset(
-                    mGoogleApiClient, asset).await().getInputStream();
 
-            if (assetInputStream == null) {
-                Log.w(TAG, "Requested an unknown Asset.");
-                return null;
+            if (currentAlbumArt != null) {
+                left = (mWidth - currentAlbumArt.getWidth()) / 2;
+                top = (mHeight - currentAlbumArt.getHeight()) / 2;
+                Log.d(TAG, "displaying art: " + left + ", " + top);
+                updateBwAlbumArt(currentAlbumArt);
             }
-            // decode the stream into a bitmap
-            return BitmapFactory.decodeStream(assetInputStream);
         }
     }
 }
